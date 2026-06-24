@@ -1,4 +1,4 @@
-
+import itertools
 
 import numpy as np
 import pandas as pd
@@ -6,6 +6,18 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 # import pypfopt as pf  # not installed / not yet used
 from scipy.optimize import minimize
+
+# QUartely/ yearly rebalance
+# Double check dividend inclusion in the prices data from Yahoo Finance (should be included in the adjusted close)
+# Mean reversion over a longer time period?
+# Impact of taxes vs tax-free funds
+# Look for stocks with Betas closer to 0? Use seperate File
+
+# Priorities:
+# 
+# Combination of sharpe optimization/mean reversion and the correlation minimization
+# Mean reversion element?
+
 
 
 def compute_returns(prices: pd.DataFrame) -> pd.DataFrame:
@@ -99,9 +111,69 @@ def plot_efficient_frontier(volatilities, target_returns, optimal_vol, optimal_r
     plt.show()
 
 
+def plot_fund_growth(data: pd.DataFrame, tickers: list):
+    """Plot normalized growth of $1 invested, for the given tickers, over the full date range."""
+    normalized = data[tickers] / data[tickers].iloc[0]
+    plt.figure(figsize=(10, 6))
+    for ticker in tickers:
+        plt.plot(normalized.index, normalized[ticker], label=ticker)
+    plt.xlabel("Date")
+    plt.ylabel("Growth of $1")
+    plt.title(f"{' vs '.join(tickers)} — Growth Over Time")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def windowed_correlations(returns: pd.DataFrame, window: int = 60) -> pd.DataFrame:
+    """
+    Slide a `window`-day lookback forward one trading day at a time and
+    compute the pairwise correlation matrix within each window.
+
+    Returns a DataFrame indexed by window end-date, one column per fund pair.
+    """
+    pairs = list(itertools.combinations(returns.columns, 2))
+    records = []
+    index = []
+
+    for start in range(0, len(returns) - window + 1):
+        chunk = returns.iloc[start:start + window]
+        corr = chunk.corr()
+        records.append({f"{a}-{b}": corr.loc[a, b] for a, b in pairs})
+        index.append(chunk.index[-1])
+
+    return pd.DataFrame(records, index=index)
+
+
+def plot_windowed_correlations(corr_over_time: pd.DataFrame, window: int = 60):
+    """Heatmap of fund-pair correlation (rows) across a sliding window (columns)."""
+    matrix = corr_over_time.T
+    col_labels = [d.strftime("%Y-%m-%d") for d in matrix.columns]
+
+    max_ticks = 40
+    tick_step = max(1, len(col_labels) // max_ticks)
+    tick_positions = range(0, len(col_labels), tick_step)
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+    im = ax.imshow(matrix.values, cmap="coolwarm", vmin=-1, vmax=1, aspect="auto")
+
+    ax.set_yticks(range(len(matrix.index)))
+    ax.set_yticklabels(matrix.index)
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([col_labels[i] for i in tick_positions], rotation=90, fontsize="small")
+    ax.set_xlabel("Window End Date")
+    ax.set_title(f"Pairwise Fund Correlation — Sliding {window}-Day Window")
+    fig.colorbar(im, ax=ax, label="Correlation")
+    plt.tight_layout()
+    plt.show()
+
+
 def main():
     tickers = ['VCADX', 'VSIAX', 'VTCLX', 'VTIAX', 'VTSAX', 'VUIAX']
-    data = yf.download(tickers, start='2015-01-01', end='2025-01-01')['Close']
+    data = yf.download(tickers, start='2015-01-01', end='2026-01-01')['Close']
+
+    print(data.corr())
+    plot_fund_growth(data, ['VCADX', 'VTIAX'])
 
     RFR = 0.045 # to be adjusted later with a more specific yield for that period
     MAX_WEIGHT = 0.35 # per-fund cap to avoid all-or-nothing concentration
@@ -109,6 +181,9 @@ def main():
     exp_rets = compute_expected_returns(returns)
     cov = compute_covariance(returns)
     optimal_weights = optimize_portfolio(exp_rets, cov, RFR, MAX_WEIGHT)
+
+    corr_over_time = windowed_correlations(returns, window=60)
+    plot_windowed_correlations(corr_over_time, window=60)
 
     port_return, port_vol, sharpe = portfolio_performance(optimal_weights, exp_rets, cov, RFR)
 
