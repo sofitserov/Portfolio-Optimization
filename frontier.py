@@ -187,12 +187,28 @@ def main():
 
     port_return, port_vol, sharpe = portfolio_performance(optimal_weights, exp_rets, cov, RFR)
 
-    print("Optimal weights:")
+    ew_weights = np.array([1 / len(tickers)] * len(tickers))
+    ew_return, ew_vol, ew_sharpe = portfolio_performance(ew_weights, exp_rets, cov, RFR)
+
+    returns = compute_returns(data)
+    def max_drawdown(weights):
+        cum = (1 + returns.values @ weights).cumprod()
+        return (cum / np.maximum.accumulate(cum) - 1).min()
+
+    opt_dd = max_drawdown(optimal_weights)
+    ew_dd  = max_drawdown(ew_weights)
+
+    print("\nOptimal weights:")
     for ticker, weight in zip(tickers, optimal_weights):
-        print(f"  {ticker}: {weight:.4f}")
-    print(f"Expected annual return: {port_return:.4f}")
-    print(f"Annual volatility: {port_vol:.4f}")
-    print(f"Sharpe ratio: {sharpe:.4f}")
+        if weight > 0.001:
+            print(f"  {ticker}: {weight:.2%}")
+
+    col = 22
+    print(f"\n{'':>{col}}  {'Optimal':>10}  {'Equal-weight':>12}")
+    print(f"{'Expected annual return':>{col}}  {port_return:>10.2%}  {ew_return:>12.2%}")
+    print(f"{'Annual volatility':>{col}}  {port_vol:>10.2%}  {ew_vol:>12.2%}")
+    print(f"{'Sharpe ratio':>{col}}  {sharpe:>10.4f}  {ew_sharpe:>12.4f}")
+    print(f"{'Max drawdown':>{col}}  {opt_dd:>10.2%}  {ew_dd:>12.2%}")
 
     volatilities, target_returns = efficient_frontier(exp_rets, cov, MAX_WEIGHT)
     fund_vols = np.sqrt(np.diag(cov))

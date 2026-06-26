@@ -1,72 +1,84 @@
-# Portfolio-Optimization
+# Portfolio Optimization
 
-## Introduction
+An exploration of portfolio construction strategies on Vanguard mutual funds (2015–2026), built to understand *when* and *why* optimization adds value over a simple equal-weight baseline.
 
-This project explores portfolio optimization strategies for a fixed set of
-six Vanguard mutual funds:
+---
 
-`VCADX`, `VSIAX`, `VTCLX`, `VTIAX`, `VTSAX`, `VUIAX`
+## The Question
 
-Using ~10 years of daily NAV history (2015–2026, pulled via `yfinance`), it
-compares three approaches to choosing portfolio weights:
+Can a systematic optimizer — one that looks at historical correlations, volatility, and returns — build a better long-term portfolio than just splitting evenly across all funds? And if it can in-sample, does that hold when it's actually tested on data it never saw?
 
-1. **Mean-variance optimization** (`frontier.py`) — classic Markowitz:
-   maximize Sharpe ratio subject to a per-fund weight cap, and trace the
-   efficient frontier.
-2. **Correlation-minimization rebalancing** (`backtest.py`) — a walk-forward
-   strategy that periodically rebalances into whichever funds were least
-   correlated over the trailing window.
-3. **Correlation-minimization + mean-reversion** (`backtest.py`) — adds a
-   penalty that pushes away from funds currently outperforming their
-   own historical average, and toward funds lagging it.
+---
 
-Both walk-forward strategies are backtested out-of-sample against a static
-equal-weight benchmark. `frontier.py` also tracks how correlation between
-these funds changes over time.
+## Setup
 
-## Files
+- **Universe:** 6 original Vanguard equity funds + 14 lower-risk candidates (bonds, balanced, dividend, real estate) — 20 funds total
+- **Data:** Daily NAV prices 2015–2026 via `yfinance`
+- **Baseline:** Equal-weight across all funds in the universe, rebalanced periodically
 
-- `frontier.py` — downloads price data, runs max-Sharpe optimization with a
-  weight cap, plots the efficient frontier, and plots a sliding 60-day
-  pairwise correlation heatmap.
-- `backtest.py` — walk-forward backtest for the correlation-minimization and
-  correlation+mean-reversion strategies; prints/plots weight history and
-  compares performance against an equal-weight benchmark.
+---
 
-## Findings
+## What We Tried
 
-- **Uncapped max-Sharpe** concentrates 100% into one fund (`VTCLX`) — a known
-  failure since the Sharpe objective is highly sensitive to noisy
-  return estimates. A 35% per-fund cap fixes this (`VTCLX`/`VTSAX` 35%,
-  `VUIAX` 30%) at a Sharpe cost (~0.48 vs. ~0.52 uncapped).
-- **Correlation Changes** — pairs involving `VCADX` swing between
-  negative and positive, while the 5 equity funds stay highly 
-  correlated with each other, spiking to ~1.0 during the 2020 crash.
-- **Pure correlation-minimization underperforms.** It consistently
-  overweights `VCADX` (least-correlated, but also lowest-return) and trails
-  the equal-weight benchmark (6.6% vs. 10.1% return, Sharpe 0.19 vs. 0.40).
-  Minimizing correlation alone has no return signal to push back with.
-- **Adding mean-reversion helps, but the effect is sensitive to `λ`.** Sweeping
-  the reversion penalty weight (`reversion_lambda`) shows performance rising
-  with `λ`, peaking around `λ≈50–100` (11.3% return, Sharpe ~0.49, beating
-  the benchmark), then degrading as `λ` grows further and the correlation
-  term gets drowned out entirely.
-- **Removing `VCADX` from the universe** closes most of the gap with the
-  benchmark (9.85% vs. 11.59% return) but raises volatility and drawdown a
-  lot (11%→16% vol, -30%→-38% drawdown) — `VCADX` was acting as a low-vol
-  anchor, not just a drag on returns.
+### Sharpe Maximization (`frontier.py`, `frontier_candidates.py`)
 
-## Notes
+Classic Markowitz mean-variance optimization: find the weights that maximize return per unit of risk. On the original 6 equity funds it concentrated into just 3, producing a higher Sharpe (0.51) than equal-weight (0.40) but almost identical drawdown (-34.9% vs -32.4%) — not a meaningful improvement given the concentration risk.
 
-- Expected returns are estimated from historical means, which are noisy and
-  not a reliable predictor of future returns — small changes in the input
-  data can swing either strategy's allocation significantly.
-- **`λ≈50–100` was chosen against the full 11-year backtest
-  window — the same data used to evaluate it.** With only ~46 rebalances,
-  this risks overfitting. Next step: pick `λ` on an in-sample/train period
-  and validate on a held-out/walk-forward period before trusting it.
-- The risk-free rate (4.5%) is a placeholder and should be replaced with a
-  rate matched to the historical period being analyzed.
-- All 6 funds are broad equity index funds aside from `VCADX`, so they are
-  likely highly correlated with each other; diversification benefit here is
-  limited compared to mixing in bonds or other asset classes.
+On the full 20-fund universe the optimizer was more interesting — it mixed equity and bond funds, cutting volatility dramatically and improving Sharpe to 0.59 vs equal-weight's 0.37:
+
+| | Optimal | Equal-weight |
+|---|---|---|
+| Annual return | 9.26% | 6.74% |
+| Volatility | 8.05% | 6.08% |
+| Sharpe | 0.59 | 0.37 |
+| Max drawdown | -9.94% | -8.09% |
+
+**But these numbers use the full dataset to both fit and evaluate the weights.** To test whether the optimizer's picks actually generalize, we trained on the first 70% of the data and evaluated on the remaining 30% without retraining:
+
+- The optimal portfolio **did** achieve higher returns than equal-weight out-of-sample
+- But it came with a **larger drawdown**, a direct consequence of concentrating into only 4 funds
+- This is the fundamental tension: the optimizer finds a high-Sharpe combination historically, but concentration means any single fund underperforming hits the portfolio hard
+
+### Walk-Forward Correlation Minimization (`backtest.py`, `corr_min_candidates.py`)
+
+Instead of maximizing Sharpe, minimize the weighted average pairwise correlation between holdings — rewarding diversification directly. Run as a true walk-forward backtest: every 60 days, look back at recent correlations, solve for new weights, hold for the next 60 days. No look-ahead.
+
+On the equity-only universe it underperformed equal-weight — all 6 funds are highly correlated so the optimizer had little to work with. On the mixed 20-fund universe it did worse: it avoided equity entirely because equity funds are correlated with each other and bonds aren't. It minimized correlation perfectly while sacrificing all equity return.
+
+To fix this, we added a blended objective that penalizes correlation *and* rewards Sharpe:
+
+```
+L(w) = α × (correlation term) − (1 − α) × Sharpe(w)
+```
+
+Return estimates used a 252-day lookback (vs 60-day for correlation) — short-window return estimates are essentially noise and poisoned earlier runs of the blended objective. Even with the fix, equal-weight won across all values of α in the walk-forward test.
+
+We also added a **mean-reversion overlay** (`reversion_lambda`): tilt away from funds that have recently outperformed their own long-run average. With only ~40 effective rebalance decisions over 11 years, any tuned lambda is mostly fitting noise — we added a sweep and train/test split to diagnose this.
+
+### Risk Parity (`risk_parity.py`)
+
+Equalize each fund's *contribution to portfolio variance*. High-vol equity gets a small weight; low-vol bonds get more — but nothing is zeroed out. Solved via the log-barrier formulation with an analytical gradient (the naive squared-difference objective stalls numerically on real covariance matrices):
+
+```
+minimize  w^T Σ w − Σ log(wᵢ)
+```
+
+Risk parity correctly spread weight (equity ~2–5%, bonds ~10–15%) and produced stable allocations, but still didn't beat equal-weight in realized walk-forward returns.
+
+---
+
+## The Honest Conclusion
+
+Equal-weight is a surprisingly strong baseline — consistent with DeMiguel et al. (2009) *"Optimal Versus Naive Diversification"*. Every walk-forward test confirmed it. The one place the Sharpe optimizer showed a genuine edge (higher out-of-sample returns on the mixed universe) came with larger drawdown and high concentration risk — a tradeoff, not a free lunch.
+
+The deeper issue: every optimization strategy requires estimating something from noisy historical data. With ~40 rebalance decisions over 11 years, that estimation error routinely dominates the signal. The optimizer that "won" in-sample was largely fitting to noise.
+
+**Optimization adds real value when:**
+- The universe is large enough that equal-weight creates unnecessary concentration in correlated clusters
+- You have a specific risk target (volatility cap, drawdown limit) rather than a return target
+- Expected returns come from a factor model or fundamental signal — not short-window historical means
+
+---
+
+## Stack
+Python · NumPy · pandas · scipy · yfinance · matplotlib
